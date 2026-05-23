@@ -17,7 +17,6 @@
 - [Inputs](#inputs)
 - [Outputs](#outputs)
 - [Known Limitations](#known-limitations)
-- [Future Work](#future-work)
 - [Related Repository](#related-repository)
 - [License](#license)
 
@@ -225,18 +224,7 @@ The script produces the following visualizations (displayed inline or saved):
 - Convergence is not verified automatically; monitor ELBO/MSE plots manually.
 - The model assumes rotationally symmetric motion within each annular ring.
 - Performance on CPU is significantly slower than on GPU; a GPU is strongly recommended.
-
----
-
-## Future Work
-
-- [ ] Add CLI argument parsing (`argparse`)
-- [ ] Save output plots and numpy arrays automatically to `outputs/`
-- [ ] Add quantitative evaluation against ground-truth rotation angles
-- [ ] Support configurable ring step size and maximum radius
-- [ ] Add Colab notebook (`.ipynb`) with step-by-step walkthrough
-- [ ] Package as installable Python module
-
+  
 ---
 
 ## Related Repository
