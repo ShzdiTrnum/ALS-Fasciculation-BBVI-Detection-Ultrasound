@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Generated outputs
+outputs/*.png
+outputs/*.jpg
+outputs/*.pdf
+outputs/*.npy
+outputs/*.npz
+
+# Data files (large — add manually or via Git LFS)
+data/*.mp4
+data/*.avi
+data/*.csv
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
