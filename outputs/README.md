@@ -11,7 +11,6 @@ This directory stores generated plots and result arrays after running the detect
 | `mse.png` | MSE per pyramid level |
 | `elbo.png` | ELBO per pyramid level |
 | `center_trajectory.png` | 2D center drift plot |
-| `posterior_variance.png` | Per-ring uncertainty over time |
 
 > **Note:** Output files are excluded from version control via `.gitignore`.
 > Add them manually or upload as GitHub Release assets if you wish to share results.
