@@ -1,4 +1,4 @@
-# Fasciculation Detection Using Synthetic Data
+# Fasciculation Detection Using Ultrasound Data
 
 > Bayesian Black-Box Variational Inference (BBVI) with EM optimization and multi-scale image pyramids for detecting and estimating fasciculation-like rotational motion in ultrasound video frames.
 
