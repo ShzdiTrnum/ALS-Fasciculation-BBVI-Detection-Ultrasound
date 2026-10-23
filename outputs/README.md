@@ -1,16 +1,12 @@
 # outputs/
 
-This directory stores generated plots and result arrays after running the detection script.
+Created by `src/fasciculation_detection_bbvi.py` (change with `--output-dir`). Contents are git-ignored;
+attach results you want to share to a GitHub Release instead.
 
-**Contents after a run (if saving is enabled):**
-
-| File | Description |
-|------|-------------|
-| `rotation_angles.png` | Per-ring rotation angle vs. frame index |
-| `noise_variance.png` | Noise variance convergence per pyramid level |
-| `mse.png` | MSE per pyramid level |
-| `elbo.png` | ELBO per pyramid level |
-| `center_trajectory.png` | 2D center drift plot |
-
-> **Note:** Output files are excluded from version control via `.gitignore`.
-> Add them manually or upload as GitHub Release assets if you wish to share results.
+| File | Content |
+|---|---|
+| `run_config.json` | settings, device, PyTorch version |
+| `bbvi_results.npz` | all numeric results |
+| `rotation_mu.csv`, `rotation_posterior_variance.csv` | per ring × frame pair |
+| `center_trajectory.csv` | centre per pair (ROI and image coordinates) |
+| `*.png`, `*.pdf` | figures |

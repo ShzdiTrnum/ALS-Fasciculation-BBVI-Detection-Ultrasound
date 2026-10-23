@@ -40,3 +40,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated outputs (keep outputs/README.md)
+outputs/*
+!outputs/README.md
+
+# Optical-flow initial angles (derived numbers, no image data)
+!data/Original_Groundtruth_Values.csv

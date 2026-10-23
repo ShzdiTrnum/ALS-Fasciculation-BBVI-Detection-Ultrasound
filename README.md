@@ -1,241 +1,163 @@
-# Fasciculation Detection Using Ultrasound Data
+# BBVI Rotation Estimation of Fasciculations in ALS Muscle Ultrasound
 
-> Bayesian Black-Box Variational Inference (BBVI) with EM optimization and multi-scale image pyramids for detecting and estimating fasciculation-like rotational motion in ultrasound video frames.
+Code for the ultrasound experiments in
 
----
+> T. Shahzadi, J. Zhou, K. Bokuda, N. Tagawa.
+> **Fasciculation Detection in Ultrasound Images for ALS Diagnosis Based on Black Box Variational Inference.**
+> *Proc. 21st Int. Conf. on Computer Vision Theory and Applications (VISAPP 2026)*, vol. 3, pp. 688–695.
+> doi:[10.5220/0014623000004084](https://doi.org/10.5220/0014623000004084)
 
-## Table of Contents
+A fasciculation shows up in a cross-sectional muscle ultrasound as a brief rotation of a fibre bundle.
+This repository estimates that rotation, ring by ring around a rotation centre, between video frames using
+black-box variational inference (reparameterisation trick) inside a variational EM loop over a three-level
+image pyramid. The rotation centre and the photometric noise level are estimated in the M-step.
 
-- [Project Description](#project-description)
-- [Objectives](#objectives)
-- [Repository Structure](#repository-structure)
-- [Dependencies](#dependencies)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration Parameters](#configuration-parameters)
-- [Algorithm Overview](#algorithm-overview)
-- [Inputs](#inputs)
-- [Outputs](#outputs)
-- [Known Limitations](#known-limitations)
-- [Related Repository](#related-repository)
-- [License](#license)
+<p align="center">
+  <img src="assets/Rotation_Estimation.png" width="48%">
+  <img src="assets/Center_Trajectory.png" width="40%">
+</p>
 
 ---
 
-## Project Description
+## Repository layout
 
-This project implements a probabilistic rotation estimation pipeline for detecting fasciculation-like motion in medical video data (e.g., ALS muscle ultrasound). The algorithm models each annular ring region around a center point as having an independent rotation angle, and estimates these angles frame-by-frame using:
+| Script | Used for | Posterior | Notes |
+|---|---|---|---|
+| `src/fasciculation_detection_bbvi.py` | VISAPP 2026 Figs. 3(b), 5, 6 | unstructured, 20 rings of 5 px | CLI options listed below |
+| `src/bbvi_radial_bins_legendre.py` | VISAPP 2026 Fig. 4(b) | Legendre basis (K = 5) with KL to N(0, 1) | non-uniform radial bins, see below |
+| `src/bbvi_ultrasound_structured.py` | journal extension, real-data 2 × 2 | unstructured or cosine basis in r (U = 6), step 1 or 3 | unsupervised metrics: MSE, radial roughness, stability |
+| `src/runconfig.py` | helper | | `--NAME VALUE` overrides, figure saving |
 
-- **Black-Box Variational Inference (BBVI)** with Monte Carlo gradient estimation (ELBO maximization)
-- **Expectation-Maximization (EM)** with separate E-step (rotation angles) and M-step (center + noise)
-- **Multi-scale image pyramids** (coarse-to-fine: scales 0.25 → 0.5 → 1.0)
-- **Bayesian prior fusion** via product-of-Gaussians, combining the previous frame's posterior with the coarser pyramid level's posterior as the prior for each finer level
+`data/Original_Groundtruth_Values.csv` holds the optical-flow values used to initialise the first frame pair
+(row "Frame 6"). Despite the file name these are not ground truth; their magnitude is about 10⁻³, so the
+estimators effectively start from zero rotation.
 
-The ground truth initial rotation angles are loaded from a CSV file produced by the companion simulation repository (`Fasciculation-Simulation`).
-
----
-
-## Objectives
-
-1. **Estimate per-ring rotation angles** from consecutive video frame pairs using variational inference.
-2. **Track the rotation center** dynamically across frames using gradient-based M-step optimization.
-3. **Fuse temporal and spatial uncertainty** via Bayesian product-of-Gaussians priors across pyramid levels and frame pairs.
-4. **Quantify posterior uncertainty** — track per-ring posterior variance over time as a diagnostic.
-5. **Visualize results** — rotation trajectories, convergence metrics (MSE, ELBO, noise variance), center trajectory, and posterior variance plots.
-
----
-
-## Repository Structure
-
-```
-fasciculation-detection/
-│
-├── src/
-│   └── fasciculation_detection_bbvi.py    # Main BBVI + EM detection script
-│
-├── data/
-│   └── Original_Groundtruth_Values.csv    # Initial rotation angles CSV (user-provided)
-│
-├── outputs/                               # Plots and result arrays (gitignored)
-│   └── README.md
-│
-├── docs/
-│   └── algorithm_overview.md              # Detailed algorithm documentation
-│
-├── assets/                                # Sample output plots or preview images
-│
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
----
-
-## Dependencies
-
-| Package          | Version (recommended) | Purpose                                        |
-|------------------|-----------------------|------------------------------------------------|
-| Python           | ≥ 3.8                 | Runtime                                        |
-| numpy            | ≥ 1.21                | Array operations                               |
-| opencv-python    | ≥ 4.5                 | Video loading, image resizing                  |
-| pandas           | ≥ 1.3                 | CSV loading for initial angles                 |
-| matplotlib       | ≥ 3.4                 | Result visualization                           |
-| torch (PyTorch)  | ≥ 1.11                | Tensor ops, autograd, grid_sample              |
-| tqdm             | ≥ 4.62                | Progress bars                                  |
-
-GPU support is automatic — the script uses CUDA if available, otherwise falls back to CPU.
-
----
-
-## Installation
-
-### 1. Clone the repository
+## Quick start
 
 ```bash
-git clone https://github.com/ShzdiTrnum/Fasciculation-Detection-Using-Synthetic-Data.git
-cd Fasciculation-Detection-Using-Synthetic-Data
-```
+git clone https://github.com/ShzdiTrnum/ALS-Fasciculation-BBVI-Detection-Ultrasound.git
+cd ALS-Fasciculation-BBVI-Detection-Ultrasound
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt                       # install the CUDA build of PyTorch for GPU
 
-### 2. Create a virtual environment
-
-```bash
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-For GPU support, install the appropriate PyTorch version from https://pytorch.org/get-started/locally/
-
----
-
-## Usage
-
-### Running on Google Colab (recommended)
-
-Mount your Google Drive and update the paths at the top of the script:
-
-```python
-video_path      = "/content/drive/MyDrive/YOUR_FOLDER/your_video.mp4"
-csv_init_angles = "/content/drive/MyDrive/YOUR_FOLDER/Original_Groundtruth_Values.csv"
-```
-
-Then run:
-
-```bash
+# put the two input files in data/ (see data/README.md), then
 python src/fasciculation_detection_bbvi.py
 ```
 
-### Running locally
+Every figure and the numbers behind it are written to `outputs/` (see [Outputs](#outputs)).
+Add `--show` to also open the figures in a window.
 
-Update the same two paths to point to your local files, then run the script directly.
+## Configuration
 
----
+The defaults in the script are the settings used for the experiments. Each can be changed from the
+command line (`python src/fasciculation_detection_bbvi.py --help`):
 
-## Configuration Parameters
+| Option | Default | Meaning |
+|---|---|---|
+| `--video` | `data/ALS - Trim20s.mp4` | input video |
+| `--init-csv` | `data/Original_Groundtruth_Values.csv` | initial per-ring angles (first data row is used) |
+| `--frame-start`, `--frame-end` | 6, 24 | 1-based, inclusive |
+| `--frame-step` | 1 | pair frame *i* with frame *i + step* |
+| `--roi XMIN XMAX YMIN YMAX` | 250 500 200 450 | ROI in image pixels (250 × 250) |
+| `--radii START STOP STEP` | 5 101 5 | ring radii `np.arange(5, 101, 5)` → 20 rings |
+| `--mc-samples` | 30 | Monte-Carlo samples *S* |
+| `--outer-em` | 60 | outer EM iterations per pyramid level |
+| `--e-updates`, `--m-updates` | 30, 10 | inner E- and M-step Adam steps |
+| `--e-lr`, `--m-lr` | 1e-4 ×3, 1e-4 ×3 | Adam learning rates per level |
+| `--seed` | none | fix the random seed; the original runs did not fix one, so reruns differ slightly |
+| `--output-dir` | `outputs` | where results are written |
 
-All key parameters are defined at the top of the script:
+Pyramid scales are fixed at `[0.25, 0.5, 1.0]`. A GPU is strongly recommended.
 
-| Parameter          | Default          | Description                                                          |
-|--------------------|------------------|----------------------------------------------------------------------|
-| `video_path`       | —                | Path to input `.mp4` video file                                      |
-| `csv_init_angles`  | —                | Path to CSV with initial ground-truth rotation angles per ring       |
-| `FRAME_START`      | 6                | First frame to process (1-based)                                     |
-| `FRAME_END`        | 24               | Last frame to process (1-based, inclusive)                           |
-| `xmin/xmax`        | 250, 500         | ROI x-bounds in pixels                                               |
-| `ymin/ymax`        | 200, 450         | ROI y-bounds in pixels                                               |
-| `radii`            | `arange(5,101,5)`| Ring radii in pixels — 20 rings at 5px intervals up to 100px        |
-| `pyramid_scales`   | [0.25, 0.5, 1.0] | Multi-scale pyramid levels (coarse to fine)                          |
-| `S_mc`             | 30               | Number of Monte Carlo samples per ELBO estimate                      |
-| `OUTER_EM_ITERS`   | 60               | Number of outer EM iterations per pyramid level                      |
-| `E_UPDATES`        | 30               | Inner E-step gradient steps per outer iteration                      |
-| `M_UPDATES`        | 10               | Inner M-step gradient steps per outer iteration                      |
-| `Elr_levels`       | [1e-4, 1e-4, 1e-4] | E-step Adam learning rates per pyramid level                      |
-| `Mlr_levels`       | [1e-4, 1e-4, 1e-4] | M-step Adam learning rates per pyramid level                      |
+## Pipeline
 
----
+```
+Fasciculation-Simulation ──► synthetic video + ground truth ──► ALS-Fasciculation-BBVI-Detection-Synthetic-Data
+Optical-Flow (Green's-theorem baseline) ──► initial angles CSV ──► this repository (real ALS ultrasound)
+```
 
-## Algorithm Overview
+* [Optical-Flow](https://github.com/ShzdiTrnum/Optical-Flow): optical-flow / Green's-theorem baseline (Fig. 3a, 4a of the paper)
+* [ALS-Fasciculation-BBVI-Detection-Synthetic-Data](https://github.com/ShzdiTrnum/ALS-Fasciculation-BBVI-Detection-Synthetic-Data): the same estimator on synthetic video with known ground truth
+* [Fasciculation-Simulation](https://github.com/ShzdiTrnum/Fasciculation-Simulation): synthetic rotating-ring videos
 
-### 1. Frame Loading & ROI Cropping
-Video frames are loaded with OpenCV and cropped to the user-defined ROI.
+## Paper figures → files
 
-### 2. Radial Ring Masks
-20 concentric annular masks are computed at 5-pixel radial intervals from the ROI center.
+| Paper (VISAPP 2026) | Produced by | Output file |
+|---|---|---|
+| Fig. 3(b) BBVI rotation per radius | `fasciculation_detection_bbvi.py` | `rotation_per_radius.png`, `rotation_mu.csv` |
+| Fig. 3(a) / 4(a) optical flow | `Optical-Flow` repo | — |
+| Fig. 4(b) BBVI with non-uniform radial bins | `bbvi_radial_bins_legendre.py` | `bbvi_radial_bins_legendre_figNN.png` |
+| Fig. 5 centre-of-rotation trajectory | `fasciculation_detection_bbvi.py` | `center_trajectory_image_coords.png`, `center_trajectory.csv` |
+| Fig. 6 MSE / ELBO / noise variance | `fasciculation_detection_bbvi.py` | `convergence_*.png` |
 
-### 3. Multi-scale Image Pyramid
-Each frame pair is downsampled to 3 scales. Processing proceeds coarse → fine.
+## Journal extension: structured vs unstructured, step 1 vs 3
 
-### 4. Variational Inference (E-step)
-For each pyramid level, the posterior `q(θ) = N(μ, σ²)` is updated by maximizing the ELBO using Monte Carlo gradient estimates. Each ring has an independent `(μ, logσ²)` pair.
+```bash
+python src/bbvi_ultrasound_structured.py --STRUCTURED False --FRAME_STEP 1
+python src/bbvi_ultrasound_structured.py --STRUCTURED True  --FRAME_STEP 1
+python src/bbvi_ultrasound_structured.py --STRUCTURED False --FRAME_STEP 3
+python src/bbvi_ultrasound_structured.py --STRUCTURED True  --FRAME_STEP 3
+```
 
-### 5. Center & Noise Estimation (M-step)
-The rotation center and observation noise `σ_n` are updated by minimizing mean squared warping error. After the first frame pair, `σ_n` is fixed.
+Settings: S = 20, 50 outer EM iterations, 30 E-steps, 50 M-steps, learning rates 1e-4, `U_BASIS = 6`.
+Each run appends one row (mean MSE, radial roughness, frame-to-frame stability) to
+`outputs/real_results.csv` and saves per-pair arrays to `outputs/real_perpair_runs/`.
+There is no ground truth for real data, so these runs show smoothness and stability, not accuracy.
+`python src/bbvi_ultrasound_structured.py --help-config` lists all settings.
 
-### 6. Bayesian Prior Fusion
-When propagating from a coarse pyramid level to the next finer level, the prior is formed by the product of two Gaussians:
-- The posterior from the current coarser level
-- The posterior from the previous frame (already seeded into the next-level parameters)
+## Radial bins used for Fig. 4(b)
 
-This is standard Bayesian precision addition: `prec_fused = prec_coarse + prec_prev_frame`.
-
-### 7. Temporal Propagation
-The finest-level posterior `(μ, logσ²)` from each frame pair seeds all pyramid levels for the next pair.
-
----
-
-## Inputs
-
-| Input | Format | Description |
-|-------|--------|-------------|
-| Video file | `.mp4` | Grayscale or BGR ultrasound/synthetic video |
-| Initial angles CSV | `.csv` | Columns: `Frame`, `Rectangle_0` … `Rectangle_19` — initial rotation angles in radians for 20 rings |
-
-The initial angles CSV is produced by the `Fasciculation-Simulation` repository.
-
----
+`bbvi_radial_bins_legendre.py` sets `radii = [19, 17, 15, 13, 11, 9, 7, 5, 4]` and builds each mask as
+`(r − radii[0], r] = (r − 19, r]`. Because the masks are written in that order, smaller radii overwrite larger
+ones, and the effective bins are 0–4, 4–5, 5–7, 7–9, …, 17–19 px. Pixels farther than 19 px from the ROI
+centre are warped with θ = 0. The initial angles are the first nine optical-flow columns.
 
 ## Outputs
 
-The script produces the following visualizations (displayed inline or saved):
+| File | Content |
+|---|---|
+| `run_config.json` | every setting used for the run, device and PyTorch version |
+| `bbvi_results.npz` | all arrays below in one file |
+| `rotation_mu.csv` | posterior mean angle (rad) per ring and frame pair |
+| `rotation_posterior_variance.csv` | posterior variance per ring and frame pair |
+| `center_trajectory.csv` | estimated centre per pair, ROI and image coordinates |
+| `rotation_per_radius.png/pdf` | rotation per ring vs. frame |
+| `posterior_variance.png/pdf` | variance per ring vs. frame |
+| `convergence_mse / _noise_variance / _elbo .png/pdf` | per-level convergence (last frame pair) |
+| `center_trajectory_roi / _image_coords .png/pdf` | centre trajectory |
 
-| Output | Description |
-|--------|-------------|
-| Rotation angle plot | Per-ring rotation angle (radians) vs. frame index |
-| Noise variance plot | `σ_n` convergence across EM iterations per pyramid level |
-| MSE plot | Mean squared warping error per pyramid level |
-| ELBO plot | Evidence lower bound per pyramid level |
-| Center trajectory | 2D scatter plot of rotation center drift over frames |
-| Posterior variance plot | Per-ring posterior variance over time (uncertainty diagnostic) |
+## How the code relates to the paper's equations
 
----
+`fasciculation_detection_bbvi.py` implements the unstructured (independent per-ring) posterior. Compared with the full formulation
+in the paper, the released version omits the KL term in the E-step, uses the product-of-Gaussians fusion to
+initialise each level rather than as a prior inside the objective, and keeps the ring masks centred on the ROI.
+The convergence plot labelled "ELBO" therefore shows the expected log-likelihood term.
+[`docs/algorithm_overview.md`](docs/algorithm_overview.md) lists these points in detail.
 
-## Known Limitations
+## Data
 
-- Input paths are hardcoded for Google Colab/Drive. Update before local use.
-- No CLI argument parser — all config is edited directly in the script.
-- Convergence is not verified automatically; monitor ELBO/MSE plots manually.
-- The model assumes rotationally symmetric motion within each annular ring.
-- Performance on CPU is significantly slower than on GPU; a GPU is strongly recommended.
-  
----
+The clinical ultrasound videos were acquired at Tokyo Metropolitan Neurological Hospital and are not
+redistributed here. See [`data/README.md`](data/README.md) for the expected file formats.
 
-## Related Repository
+## Citation
 
-This repository uses initial rotation angle values generated by:
+```bibtex
+@inproceedings{shahzadi2026bbvi,
+  author    = {Shahzadi, Turrnum and Zhou, Junfeng and Bokuda, Kota and Tagawa, Norio},
+  title     = {Fasciculation Detection in Ultrasound Images for {ALS} Diagnosis Based on Black Box Variational Inference},
+  booktitle = {Proceedings of the 21st International Conference on Computer Vision Theory and Applications (VISAPP)},
+  volume    = {3},
+  pages     = {688--695},
+  year      = {2026},
+  publisher = {SciTePress},
+  doi       = {10.5220/0014623000004084}
+}
+```
 
-**[Fasciculation-Simulation](https://github.com/ShzdiTrnum/Fasciculation-Simulation)**
-> Synthetic video simulation of concentric ring rotation with acceleration/deceleration dynamics.
+## Acknowledgements
 
----
+Supported by AMED under Grant Number JP25ym0126818.
 
 ## License
 
-This project is released under the MIT License. See `LICENSE` for details.
+MIT (see `LICENSE`).

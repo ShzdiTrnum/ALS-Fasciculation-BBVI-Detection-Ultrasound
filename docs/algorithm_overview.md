@@ -1,135 +1,103 @@
-# Algorithm Overview
+# Algorithm overview and implementation notes
 
-This document provides a detailed explanation of the BBVI + EM rotation estimation algorithm used in `fasciculation_detection_bbvi.py`.
-
----
-
-## Problem Statement
-
-Given two consecutive grayscale video frames `f1` and `f2` (cropped to a Region of Interest), estimate the rotation angle `θ_r` for each of `R` concentric annular rings centered at a point `(cx, cy)`. The rotation model assumes that the pixel intensity pattern in ring `r` of `f1` can be recovered by rotating the corresponding region of `f2` by angle `θ_r` around the center.
+This page describes what the code in `src/` **actually computes**, step by step,
+and lists where the implementation is simpler than the full formulation in the paper.
+Reading it next to the source should take about ten minutes.
 
 ---
 
-## Probabilistic Model
+## 1. Inputs
 
-### Observation model
+* Two grayscale frames `f1 = frame[i]` and `f2 = frame[i + FRAME_STEP]`, cropped to the ROI and scaled to `[0, 1]`.
+* Concentric annular masks around the **ROI centre**: ring *k* contains the pixels whose distance
+  from the ROI centre lies in `(r_k − Δ/2, r_k + Δ/2]`, with `r_k` from `--radii` and `Δ = radii[0]`
+  (`make_radial_masks`). Pixels outside every ring get θ = 0 in the warp.
+  - Ultrasound defaults (5, 10, …, 100): `Δ = 5` = ring spacing, so the rings tile the disc.
+  - Synthetic defaults (10, 30, …, 190): `Δ = 10` but the spacing is 20, so each ring is 10 px wide and the
+    10 px gaps between rings (e.g. 15–25 px) are warped with θ = 0.
+* An initial rotation angle per ring, read from the **first data row** of `--init-csv`.
 
-```
-f1(x) ≈ f2(R(θ_r, c) · x) + ε,    ε ~ N(0, σ_n²)
-```
-
-Where `R(θ_r, c)` is a rotation transformation by `θ_r` radians around center `c`.
-
-### Latent variable
-
-```
-θ = {θ_r : r = 1 ... R}    (R = 20 independent rotation angles)
-```
-
-### Prior (fused Gaussian)
-
-At each pyramid level and frame pair, a Gaussian prior is formed by the product of:
-1. The posterior from the previous frame
-2. The posterior from the coarser pyramid level
+## 2. Observation model
 
 ```
-p(θ) ∝ N(θ | μ_prev, σ²_prev) · N(θ | μ_coarse, σ²_coarse)
-     = N(θ | μ_fused, σ²_fused)
+f1(x) = f2( R(θ_k) (x − c) + c ) + n,     n ~ N(0, σ_n²),   x in ring k
+R(θ)  = [[cos θ, −sin θ], [sin θ, cos θ]]
 ```
 
-Where precision adds:
-```
-1/σ²_fused = 1/σ²_prev + 1/σ²_coarse
-μ_fused    = σ²_fused · (μ_prev/σ²_prev + μ_coarse/σ²_coarse)
-```
+The warp is done with `torch.nn.functional.grid_sample` (bilinear, border padding).
+The rotation centre `c` is a free parameter; the ring masks themselves stay fixed around the ROI centre.
 
----
+**Sign convention.** With this model, content that rotates counter-clockwise on screen
+(OpenCV's positive angle) from `f1` to `f2` gives a **negative** `θ`.
 
-## Variational Inference (E-step)
+## 3. Variational posterior
 
-The variational posterior is mean-field Gaussian:
+Mean-field Gaussian with one independent angle per ring (the "unstructured" parameterisation):
 
 ```
-q(θ) = ∏_r N(θ_r | μ_r, σ²_r)
+q(θ) = Π_k N(θ_k | μ_k, σ_k²)      parameters: μ_k, log σ_k²
+θ^(s) = μ + σ ⊙ ε^(s),  ε^(s) ~ N(0, I)      (reparameterisation trick)
 ```
 
-Parameters `{μ_r, log σ²_r}` are optimized by maximizing the Evidence Lower Bound (ELBO):
+## 4. E-step (as implemented)
+
+The E-step minimises the Monte-Carlo estimate of the expected photometric error, scaled by the noise level:
 
 ```
-ELBO = E_q[log p(f1 | θ, c, σ_n)] - KL[q(θ) || p(θ)]
+loss_E = (1 / 2σ_n²) · (1/S) Σ_s || f1 − warp(f2, θ^(s), c) ||²
 ```
 
-The expectation is approximated with `S_mc = 30` Monte Carlo samples using the reparameterization trick:
+with Adam on `(μ, log σ²)`. On the **first frame pair** the gradient of `μ` is zeroed, so `μ` stays at the
+values from `--init-csv` and only `σ` is updated.
+
+> **Note.** In this version the KL term is set to zero (`kl = 0` in the ultrasound script; absent in the
+> synthetic script), and there is no entropy term. The quantity plotted as "ELBO (Log-Likelihood)" is the
+> expected log-likelihood term only. Without the KL/entropy terms nothing prevents `σ_k` from shrinking,
+> so the posterior variances should be read as a diagnostic, not as calibrated uncertainty.
+
+## 5. M-step (as implemented)
+
+* `c` is updated with Adam on the same expected squared error.
+* After each outer iteration, `σ_n² = (1/S) Σ_s ||f1 − warp(f2, θ^(s), c)||² / (H·W)` (closed form).
+* The scripts store the first pair's `σ_n` per level and set it at the start of later pairs, but the closed-form
+  update above then overwrites it on every outer iteration, so in practice `σ_n` keeps being re-estimated.
+
+## 6. Coarse-to-fine pyramid and prior fusion
+
+Scales `0.25 → 0.5 → 1.0`. After a level converges, its posterior is combined with the posterior that was
+seeded into the next level (the previous frame pair's result) by a product of Gaussians:
 
 ```
-θ^(s) = μ + σ · ε^(s),    ε^(s) ~ N(0, I)
+1/σ²_fused = 1/σ²_coarse + 1/σ²_prev
+μ_fused    = σ²_fused · (μ_coarse/σ²_coarse + μ_prev/σ²_prev)
 ```
 
-The log-likelihood term is:
+`(μ_fused, log σ²_fused)` is used as the **starting point** of the next level's optimisation
+(it does not enter the loss as a prior, because the KL term is zero). The centre is rescaled to the next level.
 
-```
-log p(f1 | θ, c, σ_n) = -1/(2σ_n²) · ||f1 - warp(f2, θ, c)||²_F
-```
+## 7. Temporal propagation
 
----
+The finest-level `(μ, log σ²)` of pair *t* seeds every level of pair *t + 1*. The centre is reset to the ROI
+centre at the start of every pair.
 
-## Center & Noise Estimation (M-step)
+## 8. Differences from the paper's full formulation
 
-The rotation center `c = (cx, cy)` and noise variance `σ_n` are updated by minimizing the expected squared warping error:
+| Paper | This code |
+|---|---|
+| ELBO = E_q[log p] − KL(q‖p) (Eq. 7, 10) | KL term omitted (see §4) |
+| Fused Gaussian used as the prior p(w) (Eq. 20 in the journal draft) | Fused Gaussian used as the initialisation (§6) |
+| Structured basis-function posterior (Sec. 4.2) | Not in this repository — independent per-ring angles only |
+| Log-normal reparameterisation (VISAPP Sec. 4.3) | Not implemented |
+| Green's-theorem initialisation | Initial angles read from a CSV produced by the `Optical-Flow` repo (ultrasound) or the simulation (synthetic) |
+| Radius `r` measured from the estimated centre `c` (Eq. 2) | Ring masks fixed around the ROI centre |
 
-```
-min_{c, σ_n}  E_q[||f1 - warp(f2, θ, c)||²]
-```
+## 9. Diagnostics produced
 
-`σ_n` is additionally updated analytically:
-
-```
-σ_n² = E_q[||f1 - warp(f2, θ, c)||²] / (H · W)
-```
-
-After the first frame pair, `σ_n` is frozen at its estimated value.
-
----
-
-## Multi-Scale Pyramid
-
-Processing proceeds from coarsest (scale = 0.25) to finest (scale = 1.0). At each level transition:
-
-1. The coarse-level posterior `q_coarse(θ)` is computed.
-2. The previous-frame posterior `q_prev(θ)` (seeded into the next level) acts as temporal prior.
-3. A Bayesian product-of-Gaussians fusion produces the initialisation for the next finer level.
-4. The rotation center is scaled proportionally.
-
-This coarse-to-fine strategy prevents the optimization from getting stuck in local minima due to large displacements.
-
----
-
-## Temporal Propagation
-
-For frame pair `t > 0`, the finest-level posterior `(μ_fin, logσ²_fin)` from pair `t-1` is used to seed all pyramid levels of pair `t`. This enables temporal continuity in both the mean estimates and the uncertainty.
-
----
-
-## Warping Implementation
-
-Rotation warping uses `torch.nn.functional.grid_sample` with bilinear interpolation. The sampling grid is computed analytically from the rotation angle map:
-
-```
-x_warped = cos(θ) · (x - cx) - sin(θ) · (y - cy) + cx
-y_warped = sin(θ) · (x - cx) + cos(θ) · (y - cy) + cy
-```
-
-The grid is normalized to `[-1, 1]` as required by `grid_sample`.
-
----
-
-## Output Diagnostics
-
-| Plot | What to look for |
-|------|-----------------|
-| Rotation angle vs frame | Smooth temporal trajectories indicate good convergence |
-| ELBO vs iteration | Should increase monotonically within each level |
-| MSE vs iteration | Should decrease; plateau indicates convergence |
-| Noise variance | Should stabilize after first few outer iterations |
-| Posterior variance | Should decrease or stay low — increasing variance suggests poor fitting |
-| Center trajectory | Should remain within or near the ROI boundary |
+| File | What it shows |
+|---|---|
+| `rotation_per_radius.*` | posterior mean `μ_k` per ring vs. source frame |
+| `posterior_variance.*` | `σ_k²` per ring vs. source frame (see note in §4) |
+| `convergence_mse.*` | mean photometric error per outer EM iteration, each level (last frame pair) |
+| `convergence_noise_variance.*` | `σ_n` per outer iteration, each level (last frame pair) |
+| `convergence_elbo.*` | expected log-likelihood term per outer iteration, each level (last frame pair) |
+| `center_trajectory_roi.*` / `center_trajectory_image_coords.*` | estimated centre per pair, ROI or full-image pixel coordinates |

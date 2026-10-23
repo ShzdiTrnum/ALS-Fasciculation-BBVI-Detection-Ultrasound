@@ -4,6 +4,12 @@ import copy
 import cv2
 import numpy as np
 import pandas as pd
+import sys
+import json
+import argparse
+import matplotlib
+if "--show" not in sys.argv:          # save figures without needing a display
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import Normalize
@@ -24,12 +30,14 @@ import torch.nn.functional as F
 from torch import nn
 
 # -----------------------------
-# User-specified paths & params
+# Default configuration = the settings used for the reported experiments.
+# Any value can be overridden from the command line (see --help).
 # -----------------------------
-video_path = "/content/drive/MyDrive/VI/ALS - Trim20s.mp4"
-csv_init_angles = "/content/drive/MyDrive/VI/Original_Groundtruth_Values.csv"
+video_path = "data/ALS - Trim20s.mp4"
+csv_init_angles = "data/Original_Groundtruth_Values.csv"
 FRAME_START = 6
 FRAME_END = 24
+FRAME_STEP = 1     # pair (frame i, frame i+FRAME_STEP); 1 = consecutive frames
 # ROI
 xmin, xmax = 250, 500
 ymin, ymax = 200, 450
@@ -51,6 +59,118 @@ Mlr_levels = [0.0001, 0.0001, 0.0001]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_default_dtype(torch.float32)
+
+
+# -----------------------------
+# Command-line overrides, seeding, saving
+# (added for the public release; does not change the estimator)
+# -----------------------------
+
+OUTPUT_DIR = "outputs"
+SHOW_PLOTS = False
+SEED       = None
+
+
+def parse_args():
+    """Override the module-level defaults above from the command line."""
+    global video_path, csv_init_angles, FRAME_START, FRAME_END, FRAME_STEP
+    global xmin, xmax, ymin, ymax, radii, num_radii
+    global S_mc, OUTER_EM_ITERS, E_UPDATES, M_UPDATES, Elr_levels, Mlr_levels
+    global OUTPUT_DIR, SHOW_PLOTS, SEED
+
+    p = argparse.ArgumentParser(description=__doc__ or "BBVI rotation estimation")
+    p.add_argument("--video", default=video_path, help="input .mp4")
+    p.add_argument("--init-csv", default=csv_init_angles,
+                   help="CSV whose first data row gives the initial per-ring angles")
+    p.add_argument("--frame-start", type=int, default=FRAME_START, help="1-based, inclusive")
+    p.add_argument("--frame-end",   type=int, default=FRAME_END,   help="1-based, inclusive")
+    p.add_argument("--frame-step",  type=int, default=FRAME_STEP,  help="pair (i, i+step)")
+    p.add_argument("--roi", type=int, nargs=4, metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
+                   default=[xmin, xmax, ymin, ymax])
+    p.add_argument("--radii", type=int, nargs=3, metavar=("START", "STOP", "STEP"),
+                   default=[int(radii[0]), int(radii[-1]) + 1, int(radii[1] - radii[0])],
+                   help="np.arange(START, STOP, STEP)")
+    p.add_argument("--mc-samples", type=int, default=S_mc)
+    p.add_argument("--outer-em",   type=int, default=OUTER_EM_ITERS)
+    p.add_argument("--e-updates",  type=int, default=E_UPDATES)
+    p.add_argument("--m-updates",  type=int, default=M_UPDATES)
+    p.add_argument("--e-lr", type=float, nargs=3, default=Elr_levels)
+    p.add_argument("--m-lr", type=float, nargs=3, default=Mlr_levels)
+    p.add_argument("--output-dir", default=OUTPUT_DIR)
+    p.add_argument("--seed", type=int, default=None,
+                   help="fix the random seed (the original runs used no seed)")
+    p.add_argument("--show", action="store_true", help="also display figures")
+    a = p.parse_args()
+
+    video_path, csv_init_angles = a.video, a.init_csv
+    FRAME_START, FRAME_END, FRAME_STEP = a.frame_start, a.frame_end, a.frame_step
+    xmin, xmax, ymin, ymax = a.roi
+    radii     = np.arange(*a.radii)
+    num_radii = len(radii)
+    S_mc, OUTER_EM_ITERS, E_UPDATES, M_UPDATES = a.mc_samples, a.outer_em, a.e_updates, a.m_updates
+    Elr_levels, Mlr_levels = list(a.e_lr), list(a.m_lr)
+    OUTPUT_DIR, SHOW_PLOTS, SEED = a.output_dir, a.show, a.seed
+
+    if SEED is not None:
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    cfg = dict(video=video_path, init_csv=csv_init_angles,
+               frame_start=FRAME_START, frame_end=FRAME_END, frame_step=FRAME_STEP,
+               roi=[xmin, xmax, ymin, ymax], radii=[int(r) for r in radii],
+               pyramid_scales=pyramid_scales, mc_samples=S_mc, outer_em=OUTER_EM_ITERS,
+               e_updates=E_UPDATES, m_updates=M_UPDATES, e_lr=Elr_levels, m_lr=Mlr_levels,
+               seed=SEED, device=str(device), torch=torch.__version__)
+    with open(os.path.join(OUTPUT_DIR, "run_config.json"), "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("Config:", json.dumps(cfg))
+
+
+def _finish(fig, name):
+    """Save a figure to OUTPUT_DIR (PNG + PDF); display it only with --show."""
+    for ext in ("png", "pdf"):
+        fig.savefig(os.path.join(OUTPUT_DIR, f"{name}.{ext}"), dpi=200, bbox_inches="tight")
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
+def _save_results(frame_pairs, mu, logvar, centers, noise, mse, elbo):
+    """Save every number behind the figures so they can be re-plotted/evaluated."""
+    src = np.array([FRAME_START + i for i, _ in frame_pairs])
+    dst = np.array([FRAME_START + j for _, j in frame_pairs])
+    np.savez(os.path.join(OUTPUT_DIR, "bbvi_results.npz"),
+             source_frame=src, target_frame=dst, radii=np.asarray(radii),
+             mu_theta=mu, logvar_theta=logvar,
+             center_roi=centers, center_image=centers + np.array([xmin, ymin], dtype=np.float32),
+             noise_sigma_by_level=np.stack(noise), mse_by_level=np.stack(mse),
+             loglik_by_level=np.stack(elbo))
+    cols = [f"r{int(r)}" for r in radii]
+    pd.DataFrame(mu, columns=cols).assign(source_frame=src, target_frame=dst) \
+      .to_csv(os.path.join(OUTPUT_DIR, "rotation_mu.csv"), index=False)
+    pd.DataFrame(np.exp(logvar), columns=cols).assign(source_frame=src, target_frame=dst) \
+      .to_csv(os.path.join(OUTPUT_DIR, "rotation_posterior_variance.csv"), index=False)
+    pd.DataFrame({"source_frame": src, "target_frame": dst,
+                  "cx_roi": centers[:, 0], "cy_roi": centers[:, 1],
+                  "cx_image": centers[:, 0] + xmin, "cy_image": centers[:, 1] + ymin}) \
+      .to_csv(os.path.join(OUTPUT_DIR, "center_trajectory.csv"), index=False)
+    print(f"Saved results to {OUTPUT_DIR}/")
+
+    # Extra figure: centre trajectory in full-image coordinates
+    c = centers + np.array([xmin, ymin])
+    fig, ax = plt.subplots(figsize=(8, 8))
+    sc = ax.scatter(c[:, 0], c[:, 1], c=src, cmap="viridis", s=60, zorder=3)
+    ax.plot(c[:, 0], c[:, 1], color="black", linewidth=1.2, zorder=2)
+    for k, (x, y) in enumerate(c):
+        ax.annotate(str(src[k]), (x, y), fontsize=9, xytext=(0, 5),
+                    textcoords="offset points", ha="center")
+    ax.set_xlabel("x (image pixels)"); ax.set_ylabel("y (image pixels)")
+    ax.set_title("Centre-of-rotation trajectory (image coordinates)")
+    ax.invert_yaxis(); ax.set_aspect("equal", adjustable="datalim")
+    plt.colorbar(sc, ax=ax, label="Source frame")
+    plt.tight_layout()
+    _finish(fig, "center_trajectory_image_coords")
 
 # -----------------------------
 # Utility functions
@@ -251,7 +371,7 @@ def main():
 
     frames     = load_video_frames(video_path, FRAME_START, FRAME_END)
     num_frames = len(frames)
-    frame_pairs = [(i, i + 1) for i in range(num_frames - 1)]
+    frame_pairs = [(i, i + FRAME_STEP) for i in range(num_frames - FRAME_STEP)]
     num_pairs   = len(frame_pairs)
 
     frame0 = frames[0]
@@ -531,6 +651,9 @@ def main():
               f"center={centers_traj[pidx, :]}, "
               f"first 5 theta values={mu_theta_fin[:5]}")
 
+    _save_results(frame_pairs, all_mu_theta_r_per_pair, all_logvar_theta_r_per_pair,
+                  centers_traj, noise_variances_by_level, mse_by_level, elbo_by_level)
+
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
@@ -551,7 +674,7 @@ def main():
     ax1.tick_params(axis='x', labelsize=18)
     ax1.tick_params(axis='y', labelsize=18)
     plt.tight_layout()
-    plt.show()
+    _finish(fig1, "rotation_per_radius")
 
     metrics = [
         ("Noise Variance",        noise_variances_by_level),
@@ -578,7 +701,7 @@ def main():
             ax.set_xlabel("Iteration")
 
         plt.tight_layout()
-        plt.show()
+        _finish(fig, "convergence_" + metric_name.split(" (")[0].lower().replace(" ", "_"))
 
     centers   = centers_traj.copy()
     frame_ids = np.arange(FRAME_START, FRAME_START + num_pairs)
@@ -602,7 +725,7 @@ def main():
     cbar.set_label("Frame pair")
     ax_traj.legend()
     plt.tight_layout()
-    plt.show()
+    _finish(fig_traj, "center_trajectory_roi")
 
     fig_var, ax_var = plt.subplots(figsize=(14, 6))
     for ridx in range(0, num_radii, 2):
@@ -618,8 +741,9 @@ def main():
     ax_var.tick_params(axis='x', labelsize=18)
     ax_var.tick_params(axis='y', labelsize=18)
     plt.tight_layout()
-    plt.show()
+    _finish(fig_var, "posterior_variance")
 
 
 if __name__ == "__main__":
+    parse_args()
     main()
